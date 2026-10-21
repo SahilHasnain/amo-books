@@ -7,17 +7,23 @@ type FeedLink = {
   rel?: string;
 };
 
+type FeedImage = {
+  url?: string;
+};
+
 type FeedEntry = {
   title?: FeedText;
   content?: FeedText;
   published?: FeedText;
   category?: FeedText[];
   link?: FeedLink[];
+  media$thumbnail?: FeedImage;
 };
 
 type BooksFeed = {
   feed?: {
     entry?: FeedEntry[];
+    "openSearch$totalResults"?: FeedText;
   };
 };
 
@@ -31,7 +37,9 @@ type Book = {
 };
 
 const FEED_URL =
-  "https://books.abdemustafa.com/feeds/posts/default?alt=json&max-results=500";
+  "https://books.abdemustafa.com/feeds/posts/default?alt=json";
+
+export const dynamic = "force-dynamic";
 
 function decodeHtml(value: string) {
   return value
@@ -67,26 +75,46 @@ function getBook(entry: FeedEntry): Book | null {
     const value = `${href} ${stripMarkup(label)}`.toLowerCase();
     return value.includes(".pdf") || value.includes("download") || value.includes("pdf");
   });
+  const pageLink = entry.link?.find((link) => link.rel === "alternate")?.href;
 
   return {
     title,
     description: stripMarkup(content).slice(0, 180),
     category: entry.category?.[0]?.$t ?? "Books",
-    coverUrl: imageMatch?.[1],
-    downloadUrl: downloadLink?.[1],
+    coverUrl: imageMatch?.[1] ?? entry.media$thumbnail?.url,
+    downloadUrl: downloadLink?.[1] ?? pageLink,
     publishedAt: entry.published?.$t,
   };
 }
 
 async function getBooks(): Promise<Book[]> {
   try {
-    const response = await fetch(FEED_URL, { next: { revalidate: 3600 } });
+    const pageSize = 150;
+    const firstPageUrl = `${FEED_URL}&max-results=${pageSize}&start-index=1`;
+    const response = await fetch(firstPageUrl, { cache: "no-store" });
     if (!response.ok) {
       throw new Error(`Books feed returned ${response.status}`);
     }
 
-    const feed = (await response.json()) as BooksFeed;
-    return (feed.feed?.entry ?? []).map(getBook).filter((book): book is Book => book !== null);
+    const firstPage = (await response.json()) as BooksFeed;
+    const totalResults = Number(firstPage.feed?.["openSearch$totalResults"]?.$t ?? 0);
+    const pages = [firstPage];
+
+    for (let startIndex = pageSize + 1; startIndex <= totalResults; startIndex += pageSize) {
+      const pageResponse = await fetch(
+        `${FEED_URL}&max-results=${pageSize}&start-index=${startIndex}`,
+        { cache: "no-store" },
+      );
+      if (!pageResponse.ok) {
+        throw new Error(`Books feed page returned ${pageResponse.status}`);
+      }
+      pages.push((await pageResponse.json()) as BooksFeed);
+    }
+
+    return pages
+      .flatMap((page) => page.feed?.entry ?? [])
+      .map(getBook)
+      .filter((book): book is Book => book !== null);
   } catch (error) {
     console.error("Unable to load books feed", error);
     return [];
